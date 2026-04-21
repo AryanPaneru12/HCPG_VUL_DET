@@ -1,0 +1,26 @@
+# Google App Engine Flexible Environment configuration
+
+runtime: python
+env: flex
+runtime_version: "3.10"
+
+env_variables:
+  PORT: "8000"
+  PYTHONUNBUFFERED: "1"
+
+automatic_scaling:
+  min_instances: 1
+  max_instances: 5
+  target_cpu_utilization: 0.65
+
+resources:
+  cpu: 2
+  memory_gb: 2
+  disk_size_gb: 10
+
+health_check:
+  enable_health_check: True
+  check_interval_sec: 30
+  timeout_sec: 4
+  unhealthy_threshold: 3
+  healthy_threshold: 2
