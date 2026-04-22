@@ -1004,19 +1004,46 @@ class VirtualNodeLayer(nn.Module):
 
 class JumpingKnowledge(nn.Module):
     """
-    Jumping Knowledge Network (Xu et al., 2018).
-    Attention-weights representations from all layers and sums them.
-    Allows different nodes to use different "effective depths".
+    Jumping Knowledge Network (Xu et al., 2018) with per-node per-layer attention.
+    Each node independently decides which layer depth is most informative.
     """
     def __init__(self, dim: int, num_layers: int):
         super().__init__()
-        self.gate = nn.Linear(dim, 1)
+        self.gate = nn.Linear(dim, num_layers)
 
     def forward(self, layer_outs: List[torch.Tensor]) -> torch.Tensor:
         stacked = torch.stack(layer_outs, dim=1)                # [N, L, dim]
-        scores  = self.gate(stacked)                            # [N, L, 1]
-        weights = torch.softmax(scores, dim=1)                  # [N, L, 1]
+        scores  = self.gate(stacked)                            # [N, L, num_layers]
+        weights = torch.softmax(scores, dim=1)                  # softmax over layer dimension
         return (weights * stacked).sum(1)                       # [N, dim]
+
+
+class DenseJumpingKnowledge(nn.Module):
+    """
+    Dense JK: each layer receives outputs from ALL previous layers.
+    Combines JK aggregation with DenseNet-style dense connections.
+    """
+    def __init__(self, dim: int, num_layers: int):
+        super().__init__()
+        self.gates = nn.ModuleList([
+            nn.Linear(dim * (i + 1), dim) 
+            for i in range(num_layers)
+        ])
+        self.final_gate = nn.Linear(dim, 1)
+    
+    def forward(self, layer_outs: List[torch.Tensor]) -> torch.Tensor:
+        dense_outs = []
+        for i, h in enumerate(layer_outs):
+            if i == 0:
+                dense_outs.append(h)
+            else:
+                cat = torch.cat(dense_outs, dim=-1)
+                dense_outs.append(h + self.gates[i-1](cat))
+        
+        stacked = torch.stack(dense_outs, dim=1)  # [N, L, D]
+        scores  = self.final_gate(stacked)          # [N, L, 1]
+        weights = torch.softmax(scores, dim=1)
+        return (weights * stacked).sum(1)           # [N, D]
 
 
 class AttentionPooling(nn.Module):
@@ -1122,7 +1149,15 @@ class HGTVulnerabilityDetector(nn.Module):
             nn.GELU(),
         )
 
-        # Deep classifier with skip connection
+        # Graph Transformer Head - lets classes attend to each other before predictions
+        # Helps with co-occurring vulnerabilities (e.g. Reentrancy + UncheckedCall)
+        self.gth_q = nn.Linear(num_classes, num_classes)
+        self.gth_k = nn.Linear(num_classes, num_classes)
+        self.gth_v = nn.Linear(num_classes, num_classes)
+        self.gth_heads = 4
+        self.gth_scale = (num_classes // self.gth_heads) ** -0.5
+
+        # Deep classifier with skip connection + GTH
         self.clf_fc1 = nn.Linear(hidden_dim * 2, hidden_dim)
         self.clf_norm1 = nn.LayerNorm(hidden_dim)
         self.clf_fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
@@ -1189,7 +1224,21 @@ class HGTVulnerabilityDetector(nn.Module):
         h       = self.clf_drop1(h)
         h       = F.gelu(self.clf_fc2(h))
         h       = self.clf_drop2(h)
-        logits  = self.clf_out(h) + skip                        # residual
+        logits  = self.clf_out(h) + skip                        # [G, C]
+
+        # Graph Transformer Head - classes attend to each other
+        # Reshape for multi-head attention: [G, C] -> [G, H, C/H] -> [G*H, C/H]
+        G, C = logits.size()
+        H = min(self.gth_heads, C)
+        logits_3d = logits.view(G, H, C // H)  # [G, H, C/H]
+        Q = self.gth_q(logits_3d)  # [G, H, C/H]
+        K = self.gth_k(logits_3d)  # [G, H, C/H]
+        V = self.gth_v(logits_3d)  # [G, H, C/H]
+        attn = (Q * K).sum(-1) * self.gth_scale  # [G, H]
+        attn = F.softmax(attn, dim=1).unsqueeze(-1)  # [G, H, 1]
+        gth_out = (attn * V).sum(1)  # [G, C/H]
+        logits = logits + gth_out.view(G, C)  # Add GTH output
+
         return logits
 
 
@@ -1992,14 +2041,14 @@ def train(cfg: TrainConfig) -> Dict:
                 logits  = model(batch.x, batch.edge_index, ea, batch.batch)
                 batch_y = batch.y.view(logits.shape[0], -1)
 
-                # Apply mixup FIRST on hard labels, THEN smooth
+                # Label smoothing first (on hard labels)
+                sy = smooth_labels(batch_y, cfg.label_smoothing)
+
+                # Then apply mixup on smoothed labels (FIX: apply AFTER smooth_labels)
                 if cfg.mixup_alpha > 0:
                     idx = torch.randperm(sy.size(0), device=device)
                     sy = graph_mixup_labels(sy, sy[idx], cfg.mixup_alpha)
                     sy = sy.clamp(0.0, 1.0)
-
-                # Label smoothing (decoupled from loss)
-                sy = smooth_labels(batch_y, cfg.label_smoothing)
 
                 loss = criterion(logits, sy) / cfg.accum_steps
 
