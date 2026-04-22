@@ -3,11 +3,11 @@
 steps:
   # Build the Docker image
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['build', '-t', 'gcr.io/$PROJECT_ID/hcpgnn-auditor:$COMMIT_SHA', '.']
+    args: ['build', '-f', 'deployment/Dockerfile', '-t', 'gcr.io/$PROJECT_ID/hcpgnn-auditor:latest', '.']
 
   # Push the image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
-    args: ['push', 'gcr.io/$PROJECT_ID/hcpgnn-auditor:$COMMIT_SHA']
+    args: ['push', 'gcr.io/$PROJECT_ID/hcpgnn-auditor:latest']
 
   # Deploy to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -17,7 +17,7 @@ steps:
       - 'deploy'
       - 'hcpgnn-auditor'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/hcpgnn-auditor:$COMMIT_SHA'
+      - 'gcr.io/$PROJECT_ID/hcpgnn-auditor:latest'
       - '--region'
       - 'us-central1'
       - '--platform'
@@ -29,7 +29,7 @@ steps:
       - '2'
 
 images:
-  - 'gcr.io/$PROJECT_ID/hcpgnn-auditor:$COMMIT_SHA'
+  - 'gcr.io/$PROJECT_ID/hcpgnn-auditor:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
