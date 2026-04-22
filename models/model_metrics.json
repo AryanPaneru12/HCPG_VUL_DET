@@ -1,7 +1,21 @@
 {
-  "accuracy": 0.952,
-  "precision": 0.951,
-  "recall": 0.944,
-  "f1_score": 0.947,
-  "auc_roc": 0.979
+  "accuracy": 0.572,
+  "precision_macro": 0.08933333333333333,
+  "recall_macro": 0.4,
+  "f1_macro": 0.146005346005346,
+  "f1_micro": 0.2945054945054945,
+  "f1_weighted": 0.15803864836122902,
+  "mAP": 0.3661672306466105,
+  "MCC": 0.03360779748339945,
+  "AUC_ROC_macro": 0.5262672811059907,
+  "hamming_loss": 0.428,
+  "jaccard_macro": 0.08933333333333333,
+  "exact_match": 0.006666666666666667,
+  "per_class_auc": {
+    "Reentrancy": 0.7933768656716418,
+    "AccessControl": 0.7416328600405679,
+    "Arithmetic": 0.28430451127819545,
+    "UncheckedCall": 0.6136122881355931,
+    "TOD": 0.7945341614906831
+  }
 }

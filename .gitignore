@@ -1,0 +1,54 @@
+# ============================================
+# HCPG-GNN Project — .gitignore
+# ============================================
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+env/
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# PyTorch/ML
+*.pt
+!models/best_hgt_model.pt
+*.pth
+*.onnx
+*.h5
+wandb/
+
+# Test / Cache
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Data (large datasets — download separately)
+data/smartbugs-curated/
+data/solidifi-benchmark/
+data/smartbugs-wild/
+
+# Misc
+*.log
+*.tmp
+node_modules/
