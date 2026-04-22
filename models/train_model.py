@@ -662,25 +662,143 @@ def load_smartbugs_dataset(
     return dataset
 
 
-def load_dataset(cfg: "TrainConfig") -> List[Data]:
-    project_root  = Path(cfg.output_dir).parent
-    smartbugs_dir = project_root / "data" / "smartbugs"
+def load_swc_registry(data_dir: str, num_classes: int = 5, input_dim: int = 64) -> List[Data]:
+    """Load SWC Registry dataset."""
+    root = Path(data_dir)
+    if not root.exists():
+        return []
 
-    real_data = load_smartbugs_dataset(
-        str(smartbugs_dir),
-        num_classes=cfg.num_classes,
-        input_dim=cfg.input_dim,
-        max_per_class=2000,
-    )
-    if real_data:
-        print(f"  [Real] Loaded {len(real_data)} contracts from {smartbugs_dir}")
-    else:
-        print(f"  [Info] No SmartBugs data at {smartbugs_dir} — using synthetic.")
+    SWC_TO_CLASS = {
+        "SWC-107": 0,
+        "SWC-105": 1, "SWC-106": 1, "SWC-115": 1,
+        "SWC-101": 2,
+        "SWC-104": 3,
+        "SWC-114": 4, "SWC-116": 4,
+    }
+
+    dataset = []
+    for json_file in root.glob("**/*.json"):
+        try:
+            entry = json.loads(json_file.read_text())
+            swc_id = entry.get("SWC-ID", "")
+            if swc_id.startswith("SWC-"):
+                swc_id = "SWC-" + swc_id.replace("SWC-", "")
+            vuln_class = SWC_TO_CLASS.get(swc_id)
+
+            sol_file = json_file.with_suffix(".sol")
+            if not sol_file.exists():
+                continue
+
+            source = sol_file.read_text(encoding="utf-8", errors="ignore")
+            if len(source) < 50:
+                continue
+
+            label = np.zeros(num_classes, dtype=np.float32)
+            if vuln_class is not None:
+                label[vuln_class] = 1.0
+
+            dataset.append(_sol_to_graph(source, label, input_dim))
+        except Exception:
+            continue
+    return dataset
+
+
+def load_defi_hacks(data_dir: str, num_classes: int = 5, input_dim: int = 64) -> List[Data]:
+    """Load DeFi Hack Lab dataset."""
+    root = Path(data_dir)
+    if not root.exists():
+        return []
+
+    FOLDER_TO_CLASS = {
+        "reentrancy": 0, "reentrance": 0,
+        "access": 1, "privilege": 1, "ownership": 1,
+        "overflow": 2, "underflow": 2, "arithmetic": 2,
+        "unchecked": 3, "returnvalue": 3,
+        "frontrun": 4, "sandwich": 4, "tod": 4,
+    }
+
+    dataset = []
+    for sol_file in root.rglob("*.sol"):
+        folder_name = sol_file.parent.name.lower()
+        vuln_class = None
+        for keyword, cls in FOLDER_TO_CLASS.items():
+            if keyword in folder_name:
+                vuln_class = cls
+                break
+
+        try:
+            source = sol_file.read_text(encoding="utf-8", errors="ignore")
+            if len(source) < 50:
+                continue
+            label = np.zeros(num_classes, dtype=np.float32)
+            if vuln_class is not None:
+                label[vuln_class] = 1.0
+            dataset.append(_sol_to_graph(source, label, input_dim))
+        except Exception:
+            continue
+    return dataset
+
+
+def load_dataset(cfg: "TrainConfig") -> List[Data]:
+    search_paths = [
+        Path(cfg.output_dir) / "data" / "smartbugs",
+        Path(cfg.output_dir).parent / "data" / "smartbugs",
+        Path("data") / "smartbugs",
+        Path("smartbugs"),
+    ]
+
+    real_data = []
+    swc_data = []
+    defi_data = []
+    found_real = False
+
+    for path in search_paths:
+        if path.exists():
+            real_data = load_smartbugs_dataset(
+                str(path),
+                num_classes=cfg.num_classes,
+                input_dim=cfg.input_dim,
+                max_per_class=2000,
+            )
+            if real_data:
+                print(f"  [Real] Loaded {len(real_data)} contracts from {path}")
+                found_real = True
+                break
+
+    if not found_real:
+        swc_paths = [
+            Path(cfg.output_dir) / "data" / "swc-registry",
+            Path(cfg.output_dir).parent / "data" / "swc-registry",
+            Path("data") / "swc-registry",
+            Path("SWC-registry"),
+        ]
+        for path in swc_paths:
+            if path.exists():
+                swc_data = load_swc_registry(str(path), cfg.num_classes, cfg.input_dim)
+                if swc_data:
+                    print(f"  [SWC] Loaded {len(swc_data)} from {path}")
+                    break
+
+        defi_paths = [
+            Path(cfg.output_dir) / "data" / "defi-hacks",
+            Path(cfg.output_dir).parent / "data" / "defi-hacks",
+            Path("data") / "defi-hacks",
+            Path("DeFiHackLabs"),
+        ]
+        for path in defi_paths:
+            if path.exists():
+                defi_data = load_defi_hacks(str(path), cfg.num_classes, cfg.input_dim)
+                if defi_data:
+                    print(f"  [DeFi] Loaded {len(defi_data)} from {path}")
+                    break
+
+    if not real_data and not swc_data and not defi_data:
+        print(f"  [Info] No real datasets found — using synthetic.")
 
     synthetic = generate_hcpg_dataset(cfg)
     print(f"  [Synthetic] Generated {len(synthetic)} samples.")
 
-    combined = real_data + synthetic
+    combined = real_data + swc_data + defi_data + synthetic
     random.shuffle(combined)
     return combined
 
@@ -1191,26 +1309,45 @@ class GraphCLPretrainer(nn.Module):
         new_batch  = data.batch[keep_idx] if data.batch is not None else None
         return Data(x=new_x, edge_index=new_ei, edge_attr=new_ea, batch=new_batch)
 
+    def encode(self, x, edge_index, edge_attr, batch) -> torch.Tensor:
+        """Returns pooled graph embedding without classification head."""
+        if batch is None:
+            batch = torch.zeros(x.size(0), dtype=torch.long, device=x.device)
+        num_graphs = int(batch.max().item()) + 1
+
+        x  = self.encoder(x)
+        vn = self.vn_init.expand(num_graphs, -1).contiguous()
+
+        if edge_attr is None:
+            edge_attr = torch.zeros(edge_index.size(1), dtype=torch.long, device=x.device)
+        edge_attr = edge_attr.clamp(0, len(self.hgt_layers[0].W_K) - 1)
+
+        layer_outs = []
+        for hgt, vn_layer, gn, dp in zip(self.hgt_layers, self.vn_layers,
+                                          self.graph_norms, self.drop_paths):
+            x, vn = vn_layer(x, batch, vn)
+            x = gn(x + dp(hgt(x, edge_index, edge_attr)), batch)
+            layer_outs.append(x)
+
+        x_jk = self.jk(layer_outs)
+        xm = global_mean_pool(x_jk, batch)
+        xM = global_max_pool(x_jk, batch)
+        xs = global_add_pool(x_jk, batch)
+        xa = self.attn_pool(x_jk, batch)
+        return self.pool_proj(torch.cat([xm, xM, xs, xa], dim=-1))
+
     def _encode(self, data: Data, use_momentum: bool = False) -> torch.Tensor:
-        enc  = self.m_encoder   if use_momentum else self.encoder
+        enc  = self.m_encoder if use_momentum else self.encoder
         proj = self.m_projector if use_momentum else self.projector
         batch = getattr(data, "batch", None)
         if batch is None:
             batch = torch.zeros(data.x.size(0), dtype=torch.long, device=data.x.device)
-        logits  = enc(data.x, data.edge_index, data.edge_attr, batch)  # unused logits
-        # Get pooled representation (we need internal features)
-        # Re-encode just for pooling:
-        x = enc.encoder(data.x)
+
         ea = data.edge_attr if data.edge_attr is not None else \
              torch.zeros(data.edge_index.size(1), dtype=torch.long, device=data.x.device)
-        vn = enc.vn_init.expand(int(batch.max().item()) + 1, -1).contiguous()
-        for hgt, vn_layer, gn, dp in zip(enc.hgt_layers, enc.vn_layers,
-                                          enc.graph_norms, enc.drop_paths):
-            x, vn = vn_layer(x, batch, vn)
-            x = gn(x + dp(hgt(x, data.edge_index, ea)), batch)
-        xm = global_mean_pool(x, batch)
-        xM = global_max_pool(x, batch)
-        z  = proj(torch.cat([xm, xM], dim=-1))
+
+        embeddings = enc.encode(data.x, data.edge_index, ea, batch)
+        z = proj(embeddings)
         return F.normalize(z, dim=-1)
 
     def nt_xent(self, z1: torch.Tensor, z2: torch.Tensor, temp: float) -> torch.Tensor:
@@ -1448,7 +1585,64 @@ def mc_dropout_uncertainty(
     return arr.mean(0), arr.std(0)  # [N, C], [N, C]
 
 
-def evaluate(
+def tune_thresholds(model: nn.Module, val_loader: DataLoader,
+                   device: torch.device, num_classes: int) -> np.ndarray:
+    """Find optimal per-class threshold on validation set."""
+    model.eval()
+    y_true_all, y_prob_all = [], []
+    with torch.no_grad():
+        for batch in val_loader:
+            batch  = batch.to(device)
+            ea     = batch.edge_attr if hasattr(batch, "edge_attr") else None
+            logits = model(batch.x, batch.edge_index, ea, batch.batch)
+            y_prob_all.append(torch.sigmoid(logits).cpu().numpy())
+            y_true_all.append(batch.y.view(logits.shape[0], -1).cpu().numpy())
+
+    y_true = np.vstack(y_true_all)
+    y_prob = np.vstack(y_prob_all)
+
+    best_thresholds = np.full(num_classes, 0.5)
+    for i in range(num_classes):
+        best_f1 = 0.0
+        for thresh in np.arange(0.1, 0.9, 0.05):
+            preds = (y_prob[:, i] >= thresh).astype(int)
+            f1    = f1_score(y_true[:, i], preds, zero_division=0)
+            if f1 > best_f1:
+                best_f1 = f1
+                best_thresholds[i] = thresh
+    return best_thresholds
+
+
+class DynamicFocalASL(nn.Module):
+    """Combines ASL with dynamically updated class weights."""
+    def __init__(self, num_classes: int, gamma_neg=4, gamma_pos=1, clip=0.05):
+        super().__init__()
+        self.gamma_neg = gamma_neg
+        self.gamma_pos = gamma_pos
+        self.clip = clip
+        self.register_buffer("class_acc_ema", torch.ones(num_classes) * 0.5)
+        self.ema_decay = 0.99
+
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        probs     = torch.sigmoid(logits)
+        probs_neg = (probs + self.clip).clamp(max=1.0)
+
+        loss_pos  = targets       * torch.log(probs.clamp(min=1e-8))
+        loss_neg  = (1 - targets) * torch.log((1 - probs_neg).clamp(min=1e-8))
+
+        asl = -(
+            (1 - probs)     ** self.gamma_pos * loss_pos +
+            (1 - probs_neg) ** self.gamma_neg * loss_neg
+        )
+
+        with torch.no_grad():
+            preds = (probs.detach() > 0.5).float()
+            batch_acc = (preds == targets).float().mean(0)
+            self.class_acc_ema.mul_(self.ema_decay).add_((1 - self.ema_decay) * batch_acc)
+            dynamic_w = (1.0 / (self.class_acc_ema + 0.1)).to(logits.device)
+            dynamic_w = dynamic_w / dynamic_w.mean()
+
+        return (asl * dynamic_w.unsqueeze(0)).mean()
     model:       nn.Module,
     loader:      DataLoader,
     device:      torch.device,
@@ -1798,13 +1992,14 @@ def train(cfg: TrainConfig) -> Dict:
                 logits  = model(batch.x, batch.edge_index, ea, batch.batch)
                 batch_y = batch.y.view(logits.shape[0], -1)
 
+                # Apply mixup FIRST on hard labels, THEN smooth
+                if cfg.mixup_alpha > 0:
+                    idx = torch.randperm(sy.size(0), device=device)
+                    sy = graph_mixup_labels(sy, sy[idx], cfg.mixup_alpha)
+                    sy = sy.clamp(0.0, 1.0)
+
                 # Label smoothing (decoupled from loss)
                 sy = smooth_labels(batch_y, cfg.label_smoothing)
-
-                # Graph Mixup on smoothed labels
-                if cfg.mixup_alpha > 0:
-                    idx  = torch.randperm(sy.size(0), device=device)
-                    sy   = graph_mixup_labels(sy, sy[idx], cfg.mixup_alpha)
 
                 loss = criterion(logits, sy) / cfg.accum_steps
 
