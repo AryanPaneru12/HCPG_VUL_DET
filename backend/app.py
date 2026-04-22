@@ -85,6 +85,14 @@ DEFAULT_MODEL_METRICS = {
     "auc_roc": 0.986,
 }
 
+DEFAULT_CLASS_THRESHOLDS = {
+    "reentrancy": 0.5,
+    "access_control": 0.6,
+    "arithmetic": 0.5,
+    "unchecked_call": 0.5,
+    "tod": 0.5,
+}
+
 
 def _load_model_metrics() -> Dict[str, float]:
     """Load metrics from the training output."""
@@ -96,16 +104,56 @@ def _load_model_metrics() -> Dict[str, float]:
             data = json.load(fp)
         return {
             "accuracy": float(data.get("accuracy", DEFAULT_MODEL_METRICS["accuracy"])),
-            "f1_score": float(data.get("f1_score", DEFAULT_MODEL_METRICS["f1_score"])),
-            "precision": float(data.get("precision", DEFAULT_MODEL_METRICS["precision"])),
-            "recall": float(data.get("recall", DEFAULT_MODEL_METRICS["recall"])),
-            "auc_roc": float(data.get("auc_roc", DEFAULT_MODEL_METRICS["auc_roc"])),
+            "f1_score": float(data.get("f1_score", data.get("f1_macro", DEFAULT_MODEL_METRICS["f1_score"]))),
+            "precision": float(data.get("precision", data.get("precision_macro", DEFAULT_MODEL_METRICS["precision"]))),
+            "recall": float(data.get("recall", data.get("recall_macro", DEFAULT_MODEL_METRICS["recall"]))),
+            "auc_roc": float(data.get("auc_roc", data.get("AUC_ROC_macro", DEFAULT_MODEL_METRICS["auc_roc"]))),
         }
     except Exception:
         return DEFAULT_MODEL_METRICS.copy()
 
 
 TRAINED_METRICS = _load_model_metrics()
+
+
+def _load_class_thresholds() -> Dict[str, float]:
+    """Load per-class thresholds saved during training (if available)."""
+    thresholds = DEFAULT_CLASS_THRESHOLDS.copy()
+    candidate_files = [
+        _MODELS_DIR / "inference_thresholds.json",
+        _MODELS_DIR / "model_metrics.json",
+        _MODELS_DIR / "per_class_metrics.json",
+    ]
+    for path in candidate_files:
+        if not path.exists():
+            continue
+        try:
+            with open(path, "r", encoding="utf-8") as fp:
+                data = json.load(fp)
+            stored = (
+                data.get("thresholds")
+                or data.get("per_class_thresholds")
+                or data.get("class_thresholds")
+            )
+            if not isinstance(stored, dict):
+                continue
+            for name in thresholds:
+                if name in stored:
+                    thresholds[name] = float(stored[name])
+        except Exception:
+            continue
+    return thresholds
+
+
+CLASS_THRESHOLDS = _load_class_thresholds()
+
+
+def _threshold_pass(gnn_results: Optional[Dict[str, float]], class_name: str) -> bool:
+    if not gnn_results:
+        return False
+    return gnn_results.get(class_name, 0.0) > CLASS_THRESHOLDS.get(
+        class_name, DEFAULT_CLASS_THRESHOLDS.get(class_name, 0.5)
+    )
 
 
 def _load_gnn_model():
@@ -496,7 +544,7 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
     has_external_call = 'msg.sender.call' in source_code or '.delegatecall' in source_code
     gnn_reentrancy = gnn_results.get("reentrancy", 0.0) if gnn_results else 0.0
 
-    if has_call_value or has_external_call or gnn_reentrancy > 0.5:
+    if has_call_value or has_external_call or _threshold_pass(gnn_results, "reentrancy"):
         for func in functions:
             body = func.get('body', '')
             call_pos = max(body.find('.call{'), body.find('.call.value('), body.find('msg.sender.call'))
@@ -539,7 +587,7 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
         body_lower = func.get('body', '').lower()
         is_privileged = any(kw in fname_lower for kw in privileged_keywords) or 'selfdestruct' in body_lower
         has_guard = func['has_modifier'] or 'onlyowner' in body_lower or 'require(msg.sender' in func.get('body', '').lower()
-        if (is_privileged or gnn_access > 0.6) and not has_guard and func['is_external']:
+        if (is_privileged or _threshold_pass(gnn_results, "access_control")) and not has_guard and func['is_external']:
             vulnerabilities.append({
                 'swc_id': 'SWC-115',
                 'vulnerability_type': 'Access Control',
@@ -555,7 +603,7 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
 
     # --- SWC-114: TOD / Front-running ---
     gnn_tod = gnn_results.get("tod", 0.0) if gnn_results else 0.0
-    if 'highestbid' in src_lower or 'highestbidder' in src_lower or gnn_tod > 0.5:
+    if 'highestbid' in src_lower or 'highestbidder' in src_lower or _threshold_pass(gnn_results, "tod"):
         bid_func = next((f for f in functions if 'bid' in f['name'].lower()), None)
         vulnerabilities.append({
             'swc_id': 'SWC-114',
@@ -685,7 +733,7 @@ def calculate_metrics(vulnerabilities: List[Dict]) -> Dict:
     risk_score = min(total_risk / 4.0, 1.0)
     confidence_values = [float(v.get("confidence", 0.0)) for v in vulnerabilities]
     confidence_penalty = (1.0 - mean(confidence_values)) * 0.02 if confidence_values else 0.0
-    dynamic_acc = max(0.90, TRAINED_METRICS["accuracy"] - confidence_penalty)
+    dynamic_acc = max(0.0, TRAINED_METRICS["accuracy"] - confidence_penalty)
     return {
         'accuracy': round(dynamic_acc, 4),
         'f1_score': TRAINED_METRICS["f1_score"],
@@ -729,6 +777,9 @@ async def model_info():
         },
         "training_metrics": TRAINED_METRICS,
         "model_loaded": _model is not None,
+        "inference_mode": "hgt+rules" if _model is not None else "rules-only",
+        "fallback_mode": _model is None,
+        "class_thresholds": CLASS_THRESHOLDS,
         "vulnerability_classes": [
             "SWC-107 (Reentrancy)",
             "SWC-115 (Access Control)",
@@ -802,6 +853,9 @@ async def analyze_contract(request: ContractRequest):
         "summary": summary,
         "call_graph": call_graph,
         "cfg_graph": cfg,
+        "inference_mode": "hgt+rules" if _model is not None else "rules-only",
+        "fallback_mode": _model is None,
+        "class_thresholds": CLASS_THRESHOLDS,
     }
 
 

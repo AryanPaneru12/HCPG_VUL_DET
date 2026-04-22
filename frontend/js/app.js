@@ -5,6 +5,7 @@
 
 let analysisRunning = false;
 let startTime = Date.now();
+let latestModelInfo = null;
 
 /* ---- Logging ------------------------------------------------------------ */
 
@@ -23,6 +24,47 @@ function log(msg, type = 'info') {
 function clearLog() {
   document.getElementById('logArea').innerHTML = '';
   log('Log cleared', 'info');
+}
+
+function toPercent(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
+  return (value * 100).toFixed(1) + '%';
+}
+
+function toScore(value) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return '-';
+  return value.toFixed(3);
+}
+
+function renderModelMetrics(modelInfo) {
+  if (!modelInfo || !modelInfo.training_metrics) return;
+  const m = modelInfo.training_metrics;
+  document.getElementById('mAcc').textContent = toPercent(m.accuracy);
+  document.getElementById('mF1').textContent = toScore(m.f1_score);
+  document.getElementById('mPrec').textContent = toPercent(m.precision);
+  document.getElementById('mAuc').textContent = toScore(m.auc_roc);
+
+  document.getElementById('benchAcc').textContent = toPercent(m.accuracy);
+  document.getElementById('benchPrec').textContent = toPercent(m.precision);
+  document.getElementById('benchRecall').textContent = toPercent(m.recall);
+  document.getElementById('benchF1').textContent = toScore(m.f1_score);
+}
+
+function renderInferenceMode(modelInfo) {
+  const badge = document.getElementById('modeBadge');
+  if (!badge) return;
+  if (!modelInfo) {
+    badge.textContent = 'Mode: unknown';
+    return;
+  }
+  if (modelInfo.fallback_mode || !modelInfo.model_loaded) {
+    badge.textContent = 'Mode: Rules-only fallback';
+    badge.className = 'badge badge-cyan';
+    log('WARNING: Running in rules-only fallback mode (GNN unavailable)', 'warn');
+    return;
+  }
+  badge.textContent = 'Mode: HGT + Rules';
+  badge.className = 'badge badge-green';
 }
 
 /* ---- Results ------------------------------------------------------------ */
@@ -154,6 +196,9 @@ async function runAnalysis() {
 
   if (apiResult) {
     log('API response received - real GNN inference complete', 'ok');
+    if (apiResult.fallback_mode) {
+      log('WARNING: Backend is in rules-only fallback mode', 'warn');
+    }
   } else {
     log('Graph pooling -> contract-level embedding (dim=256)', 'info');
   }
@@ -272,14 +317,31 @@ function initLineCounter() {
 async function initHealthCheck() {
   const isHealthy = await checkAPIHealth();
   const badge = document.getElementById('apiBadge');
-  const dot = badge.querySelector('.api-status');
   if (isHealthy) {
     badge.innerHTML = '<span class="api-status"></span>API Online';
     log('Backend API connected at ' + API_BASE, 'ok');
+    latestModelInfo = await fetchModelInfo();
+    if (latestModelInfo) {
+      renderModelMetrics(latestModelInfo);
+      renderInferenceMode(latestModelInfo);
+      if (latestModelInfo.training_metrics) {
+        const t = latestModelInfo.training_metrics;
+        log(
+          'Metrics loaded from backend: Acc=' + toPercent(t.accuracy) +
+          ', F1=' + toScore(t.f1_score) +
+          ', AUC=' + toScore(t.auc_roc),
+          'info'
+        );
+      }
+    } else {
+      renderInferenceMode(null);
+      log('Could not load model metadata from backend', 'warn');
+    }
   } else {
     badge.innerHTML = '<span class="api-status offline"></span>API Offline';
     badge.className = 'badge badge-cyan';
     log('Backend API offline - using local detection', 'warn');
+    renderInferenceMode({ fallback_mode: true, model_loaded: false });
   }
 }
 
@@ -290,9 +352,7 @@ document.addEventListener('DOMContentLoaded', () => {
   initLineCounter();
   initFileUpload();
   initHealthCheck();
-  log('HGT-v4 model weights loaded (10,847 contracts trained)', 'info');
-  log('Benchmark: Acc=97.9%, F1=0.939, AUC=0.946', 'accent');
-  log('Datasets: SmartBugs + SolidiFI + Etherscan verified', 'info');
+  log('Ready - loading runtime model details from backend', 'info');
 });
 
 /* ---- Training Window -------------------------------------------------- */

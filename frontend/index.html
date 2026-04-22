@@ -24,6 +24,7 @@
   <div class="header-badges">
     <span class="badge badge-cyan">HGT Architecture</span>
     <span class="badge badge-green" id="apiBadge"><span class="api-status"></span>API Ready</span>
+    <span class="badge badge-purple" id="modeBadge">Mode: detecting...</span>
     <span class="badge badge-purple">BCSE498J — VIT</span>
     <button class="btn btn-secondary" style="padding:4px 12px;font-size:10px" onclick="openTrainingWindow()">Train Model</button>
     <button class="btn btn-secondary" style="padding:4px 12px;font-size:10px" onclick="openTestWindow()">Test</button>
@@ -135,7 +136,13 @@ contract VulnerableBank {
             <tr><td style="text-align:left;color:var(--muted)">DR-GCN</td><td>82.3%</td><td>80.1%</td><td>79.4%</td><td>0.797</td></tr>
             <tr><td style="text-align:left;color:var(--muted)">R-GCN</td><td>87.6%</td><td>85.3%</td><td>84.8%</td><td>0.850</td></tr>
             <tr><td style="text-align:left;color:var(--muted)">HAN</td><td>91.2%</td><td>89.4%</td><td>90.1%</td><td>0.897</td></tr>
-            <tr class="highlight"><td style="text-align:left">HGT (Ours)</td><td>97.9%</td><td>100%</td><td>88.5%</td><td>0.939</td></tr>
+            <tr class="highlight">
+              <td style="text-align:left">HGT (Ours)</td>
+              <td id="benchAcc">-</td>
+              <td id="benchPrec">-</td>
+              <td id="benchRecall">-</td>
+              <td id="benchF1">-</td>
+            </tr>
           </tbody>
         </table>
       </div>
@@ -153,10 +160,10 @@ contract VulnerableBank {
         <span style="font-size:10px;color:var(--muted)">HGT - Heterogeneous Graph Transformer</span>
       </div>
       <div class="metrics-grid">
-        <div class="metric-card"><div class="metric-value" id="mAcc">97.9%</div><div class="metric-label">Accuracy</div></div>
-        <div class="metric-card"><div class="metric-value green" id="mF1">0.939</div><div class="metric-label">F1 Score</div></div>
-        <div class="metric-card"><div class="metric-value amber" id="mPrec">100%</div><div class="metric-label">Precision</div></div>
-        <div class="metric-card"><div class="metric-value purple" id="mAuc">0.946</div><div class="metric-label">AUC-ROC</div></div>
+        <div class="metric-card"><div class="metric-value" id="mAcc">-</div><div class="metric-label">Accuracy</div></div>
+        <div class="metric-card"><div class="metric-value green" id="mF1">-</div><div class="metric-label">F1 Score</div></div>
+        <div class="metric-card"><div class="metric-value amber" id="mPrec">-</div><div class="metric-label">Precision</div></div>
+        <div class="metric-card"><div class="metric-value purple" id="mAuc">-</div><div class="metric-label">AUC-ROC</div></div>
       </div>
     </div>
 
