@@ -3,3 +3,5 @@ uvicorn[standard]>=0.20.0
 pydantic>=2.0.0
 python-multipart>=0.0.6
 numpy>=1.23.0
+torch>=2.0.0
+torch-geometric>=2.3.0
