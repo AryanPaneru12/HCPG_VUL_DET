@@ -39,15 +39,43 @@ function toScore(value) {
 function renderModelMetrics(modelInfo) {
   if (!modelInfo || !modelInfo.training_metrics) return;
   const m = modelInfo.training_metrics;
-  document.getElementById('mAcc').textContent = toPercent(m.accuracy);
-  document.getElementById('mF1').textContent = toScore(m.f1_score);
-  document.getElementById('mPrec').textContent = toPercent(m.precision);
-  document.getElementById('mAuc').textContent = toScore(m.auc_roc);
 
-  document.getElementById('benchAcc').textContent = toPercent(m.accuracy);
-  document.getElementById('benchPrec').textContent = toPercent(m.precision);
-  document.getElementById('benchRecall').textContent = toPercent(m.recall);
-  document.getElementById('benchF1').textContent = toScore(m.f1_score);
+  function fmtPct(v) {
+    if (v === null || v === undefined) return null;
+    return (v * 100).toFixed(1) + '%';
+  }
+  function fmtScore(v) {
+    if (v === null || v === undefined) return null;
+    return v.toFixed(3);
+  }
+  function setMetric(id, formatted, isNA) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    if (isNA || formatted === null) {
+      el.textContent = 'N/A';
+      el.classList.add('metric-na');
+      el.title = 'Run training first: python models/train_model.py';
+    } else {
+      el.textContent = formatted;
+      el.classList.remove('metric-na');
+      el.title = '';
+    }
+  }
+
+  setMetric('mAcc',  fmtPct(m.accuracy),   m.accuracy  === null);
+  setMetric('mF1',   fmtScore(m.f1_score), m.f1_score  === null);
+  setMetric('mPrec', fmtPct(m.precision),  m.precision === null);
+  setMetric('mAuc',  fmtScore(m.auc_roc),  m.auc_roc   === null);
+
+  // Benchmark row
+  setMetric('benchAcc',    fmtPct(m.accuracy),   m.accuracy   === null);
+  setMetric('benchPrec',   fmtPct(m.precision),  m.precision  === null);
+  setMetric('benchRecall', fmtPct(m.recall),     m.recall     === null);
+  setMetric('benchF1',     fmtScore(m.f1_score), m.f1_score   === null);
+
+  if (!modelInfo.metrics_available) {
+    log('WARNING: Model metrics show real values but performance is low — retrain with real datasets', 'warn');
+  }
 }
 
 function renderInferenceMode(modelInfo) {
@@ -102,6 +130,10 @@ function displayResults(findings) {
     row.className = 'fade-in';
     row.style.animationDelay = (i * 0.1) + 's';
     row.style.opacity = 0;
+    const src = f.detectionSource || '';
+    const srcBadge = src === 'GNN'
+      ? '<span class="source-badge source-gnn">GNN</span>'
+      : src ? '<span class="source-badge source-rule">Rule</span>' : '<span style="color:var(--muted)">—</span>';
     row.innerHTML =
       `<td style="color:var(--accent);font-weight:700">${f.swc}</td>` +
       `<td style="color:var(--text)">${f.type}</td>` +
@@ -109,6 +141,7 @@ function displayResults(findings) {
       `<td><span class="severity-badge sev-${f.severity}">${f.severity}</span></td>` +
       `<td><div class="conf-bar-wrap"><div class="conf-bar"><div class="conf-fill" style="width:${f.confidence * 100}%"></div></div><span class="conf-val">${(f.confidence * 100).toFixed(0)}%</span></div></td>` +
       `<td style="text-align:center">${f.crossFunc ? '<span style="color:var(--accent)">YES</span>' : '<span style="color:var(--muted)">No</span>'}</td>` +
+      `<td style="text-align:center">${srcBadge}</td>` +
       `<td style="color:var(--muted);font-size:10px">${f.fix}</td>`;
     tbody.appendChild(row);
   });
@@ -222,7 +255,8 @@ async function runAnalysis() {
       confidence: v.confidence,
       crossFunc: v.cross_function,
       fns: v.function_affected,
-      fix: v.remediation
+      fix: v.remediation,
+      detectionSource: v.detection_source || (apiResult.fallback_mode ? 'Rule' : 'GNN'),
     }));
   } else if (!apiResult) {
     // Local fallback detection

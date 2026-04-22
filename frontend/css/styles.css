@@ -361,3 +361,42 @@ header {
 }
 .drop-zone p { font-size: 10px; color: var(--muted); margin-top: 4px; }
 .drop-zone .drop-icon { font-size: 20px; opacity: 0.5; }
+
+/* -- Detection Source Badge ------------------------------------------------ */
+.source-badge {
+  padding: 2px 7px; border-radius: 3px;
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px;
+}
+.source-gnn   { background: rgba(0,229,255,0.12); color: var(--accent);  border: 1px solid rgba(0,229,255,0.3); }
+.source-rule  { background: rgba(100,116,139,0.15); color: var(--muted); border: 1px solid rgba(100,116,139,0.3); }
+
+/* -- N/A metric value ------------------------------------------------------ */
+.metric-na { color: var(--muted) !important; font-size: 14px !important; }
+
+/* -- Responsive Layout ----------------------------------------------------- */
+@media (max-width: 1280px) {
+  .main { grid-template-columns: 340px 1fr; }
+  .viz-row { grid-template-columns: 1fr 1fr; }
+  .viz-row .panel:last-child { grid-column: 1 / -1; }
+}
+
+@media (max-width: 1024px) {
+  .main {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+  .left-col  { grid-row: auto; }
+  .right-col { grid-row: auto; }
+  .viz-row   { grid-template-columns: 1fr 1fr; }
+}
+
+@media (max-width: 768px) {
+  header { flex-wrap: wrap; height: auto; padding: 10px 14px; gap: 8px; }
+  .header-badges { flex-wrap: wrap; }
+  .main { padding: 8px; gap: 8px; }
+  .viz-row   { grid-template-columns: 1fr; }
+  .bottom-row { grid-template-columns: 1fr; }
+  .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+  .graph-canvas { height: 180px; }
+  .code-area { min-height: 180px; }
+}

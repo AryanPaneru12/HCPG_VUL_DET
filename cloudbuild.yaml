@@ -1,0 +1,5 @@
+steps:
+- name: 'gcr.io/cloud-builders/docker'
+  args: ['build', '-t', 'gcr.io/hcpg-vul-det-v001/hcpgnn-auditor:latest', '-f', 'deployment/Dockerfile', '.']
+images:
+- 'gcr.io/hcpg-vul-det-v001/hcpgnn-auditor:latest'

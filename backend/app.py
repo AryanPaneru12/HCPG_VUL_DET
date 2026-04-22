@@ -77,12 +77,13 @@ if _frontend.exists():
 
 _MODELS_DIR = Path(__file__).parent.parent / "models"
 
+# No fabricated defaults — we show None/null if the real file is missing
 DEFAULT_MODEL_METRICS = {
-    "accuracy": 0.961,
-    "f1_score": 0.957,
-    "precision": 0.959,
-    "recall": 0.955,
-    "auc_roc": 0.986,
+    "accuracy": None,
+    "f1_score": None,
+    "precision": None,
+    "recall": None,
+    "auc_roc": None,
 }
 
 DEFAULT_CLASS_THRESHOLDS = {
@@ -94,22 +95,30 @@ DEFAULT_CLASS_THRESHOLDS = {
 }
 
 
-def _load_model_metrics() -> Dict[str, float]:
-    """Load metrics from the training output."""
+def _load_model_metrics() -> Dict[str, Any]:
+    """Load metrics from the training output JSON. Returns None values if file missing."""
     metrics_path = _MODELS_DIR / "model_metrics.json"
     if not metrics_path.exists():
+        print("[WARN] model_metrics.json not found — run training first.")
         return DEFAULT_MODEL_METRICS.copy()
     try:
         with open(metrics_path, "r", encoding="utf-8") as fp:
             data = json.load(fp)
+        # Map training-side keys to API keys (training uses f1_macro, precision_macro, etc.)
+        acc  = data.get("accuracy")
+        f1   = data.get("f1_score") or data.get("f1_macro")
+        prec = data.get("precision") or data.get("precision_macro")
+        rec  = data.get("recall") or data.get("recall_macro")
+        auc  = data.get("auc_roc") or data.get("AUC_ROC_macro")
         return {
-            "accuracy": float(data.get("accuracy", DEFAULT_MODEL_METRICS["accuracy"])),
-            "f1_score": float(data.get("f1_score", data.get("f1_macro", DEFAULT_MODEL_METRICS["f1_score"]))),
-            "precision": float(data.get("precision", data.get("precision_macro", DEFAULT_MODEL_METRICS["precision"]))),
-            "recall": float(data.get("recall", data.get("recall_macro", DEFAULT_MODEL_METRICS["recall"]))),
-            "auc_roc": float(data.get("auc_roc", data.get("AUC_ROC_macro", DEFAULT_MODEL_METRICS["auc_roc"]))),
+            "accuracy":  round(float(acc),  4) if acc  is not None else None,
+            "f1_score":  round(float(f1),   4) if f1   is not None else None,
+            "precision": round(float(prec), 4) if prec is not None else None,
+            "recall":    round(float(rec),  4) if rec  is not None else None,
+            "auc_roc":   round(float(auc),  4) if auc  is not None else None,
         }
-    except Exception:
+    except Exception as e:
+        print(f"[WARN] Could not parse model_metrics.json: {e}")
         return DEFAULT_MODEL_METRICS.copy()
 
 
@@ -157,7 +166,10 @@ def _threshold_pass(gnn_results: Optional[Dict[str, float]], class_name: str) ->
 
 
 def _load_gnn_model():
-    """Attempt to load the trained HGT model."""
+    """
+    Load the trained HGTVulnerabilityDetector from models/train_model.py.
+    Imports the EXACT same class used during training to avoid architecture mismatch.
+    """
     global _model, _model_config
     if not _TORCH_AVAILABLE:
         print("[WARN] PyTorch not installed — using rule-based detection only.")
@@ -165,81 +177,42 @@ def _load_gnn_model():
 
     model_path = _MODELS_DIR / "best_hgt_model.pt"
     if not model_path.exists():
-        print(f"[WARN] Model file not found at {model_path} — using rule-based detection only.")
+        print(f"[WARN] Model checkpoint not found at {model_path}")
+        print("[WARN] Run 'python models/train_model.py' to train first.")
+        print("[WARN] Falling back to rule-based detection only.")
         return
 
     try:
-        from torch_geometric.nn import GATv2Conv, global_mean_pool, global_max_pool, global_add_pool
-
-        # Inline model — mirrors models/train_model.py exactly
-        class EdgeAwareGATBlock(nn.Module):
-            def __init__(self, dim, heads, num_edge_types, dropout):
-                super().__init__()
-                self.gat      = GATv2Conv(dim, dim // heads, heads=heads, dropout=dropout, edge_dim=dim)
-                self.edge_emb = nn.Embedding(num_edge_types, dim)
-                self.norm     = nn.LayerNorm(dim)
-                self.dropout  = nn.Dropout(dropout)
-                self.ff       = nn.Sequential(
-                    nn.Linear(dim, dim * 2), nn.GELU(), nn.Dropout(dropout), nn.Linear(dim * 2, dim),
-                )
-                self.norm2    = nn.LayerNorm(dim)
-
-            def forward(self, x, edge_index, edge_attr=None):
-                residual = x
-                e = self.edge_emb(edge_attr.clamp(0, self.edge_emb.num_embeddings - 1)) if edge_attr is not None else None
-                x = self.gat(x, edge_index, edge_attr=e)
-                x = self.dropout(x)
-                x = self.norm(x + residual)
-                residual2 = x
-                x = self.ff(x)
-                x = self.norm2(x + residual2)
-                return F.gelu(x)
-
-        class HGTVulnerabilityDetector(nn.Module):
-            def __init__(self, input_dim, hidden_dim, num_classes,
-                         num_edge_types=5, heads=4, num_layers=3, dropout=0.15):
-                super().__init__()
-                self.encoder = nn.Sequential(
-                    nn.Linear(input_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU(), nn.Dropout(dropout),
-                    nn.Linear(hidden_dim, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU(),
-                )
-                self.gat_blocks = nn.ModuleList([
-                    EdgeAwareGATBlock(hidden_dim, heads, num_edge_types, dropout)
-                    for _ in range(num_layers)
-                ])
-                self.pool_proj = nn.Linear(hidden_dim * 3, hidden_dim * 2)
-                self.classifier = nn.Sequential(
-                    nn.Linear(hidden_dim * 2, hidden_dim), nn.LayerNorm(hidden_dim), nn.GELU(), nn.Dropout(dropout),
-                    nn.Linear(hidden_dim, hidden_dim // 2), nn.GELU(), nn.Dropout(dropout * 0.5),
-                    nn.Linear(hidden_dim // 2, num_classes),
-                )
-
-            def forward(self, x, edge_index, edge_attr=None, batch=None):
-                x = self.encoder(x)
-                for block in self.gat_blocks:
-                    x = block(x, edge_index, edge_attr)
-                if batch is not None:
-                    x_mean = global_mean_pool(x, batch)
-                    x_max  = global_max_pool(x, batch)
-                    x_sum  = global_add_pool(x, batch)
-                else:
-                    x_mean = x.mean(dim=0, keepdim=True)
-                    x_max  = x.max(dim=0, keepdim=True).values
-                    x_sum  = x.sum(dim=0, keepdim=True)
-                x = F.gelu(self.pool_proj(torch.cat([x_mean, x_max, x_sum], dim=-1)))
-                return self.classifier(x)
+        # Import the real training-time class — prevents architecture mismatch
+        import sys as _sys
+        _proj_root = str(Path(__file__).parent.parent)
+        if _proj_root not in _sys.path:
+            _sys.path.insert(0, _proj_root)
+        from models.train_model import HGTVulnerabilityDetector  # same arch as training
 
         checkpoint = torch.load(str(model_path), map_location="cpu", weights_only=False)
-        _model_config = checkpoint.get("config", {
-            "input_dim": 64, "hidden_dim": 128, "num_classes": 5,
-            "num_edge_types": 5, "heads": 4, "num_layers": 3, "dropout": 0.15,
-        })
+
+        # Config saved during training; fall back to sensible defaults
+        saved_cfg = checkpoint.get("config", {})
+        _model_config = {
+            "input_dim":      int(saved_cfg.get("input_dim",      64)),
+            "hidden_dim":     int(saved_cfg.get("hidden_dim",     256)),
+            "num_classes":    int(saved_cfg.get("num_classes",    5)),
+            "num_edge_types": int(saved_cfg.get("num_edge_types", 5)),
+            "heads":          int(saved_cfg.get("heads",          8)),
+            "num_layers":     int(saved_cfg.get("num_layers",     4)),
+            "dropout":        float(saved_cfg.get("dropout",      0.15)),
+            "drop_path_rate": float(saved_cfg.get("drop_path_rate", 0.10)),
+        }
+
         _model = HGTVulnerabilityDetector(**_model_config)
-        _model.load_state_dict(checkpoint["model_state_dict"])
+        state = checkpoint.get("model_state_dict") or checkpoint.get("ema_state") or checkpoint
+        _model.load_state_dict(state, strict=False)  # strict=False tolerates minor key diffs
         _model.eval()
-        print(f"[OK] Loaded trained HGT model from {model_path}")
+        print(f"[OK] Loaded HGT model (true TypedHGTLayer arch) from {model_path}")
     except Exception as e:
-        print(f"[WARN] Failed to load model: {e}")
+        print(f"[WARN] Failed to load GNN model: {e}")
+        print("[WARN] Falling back to rule-based detection only.")
         _model = None
 
 
@@ -550,7 +523,8 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
             call_pos = max(body.find('.call{'), body.find('.call.value('), body.find('msg.sender.call'))
             state_pos = max(body.find('balances['), body.find('balance -='), body.find('= 0;'))
             if call_pos != -1 and state_pos != -1 and call_pos < state_pos:
-                confidence = max(0.96, gnn_reentrancy) if gnn_reentrancy > 0.5 else 0.96
+                confidence = gnn_reentrancy if gnn_reentrancy > 0.5 else 0.82
+                source = "GNN" if gnn_reentrancy > 0.5 else "rule-based"
                 vulnerabilities.append({
                     'swc_id': 'SWC-107',
                     'vulnerability_type': 'Reentrancy',
@@ -570,12 +544,13 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
                     'swc_id': 'SWC-107',
                     'vulnerability_type': 'Reentrancy',
                     'severity': 'critical',
-                    'confidence': round(max(0.93, gnn_reentrancy), 2),
+                    'confidence': round(gnn_reentrancy if gnn_reentrancy > 0.3 else 0.78, 2),
                     'function_affected': func['name'],
                     'description': VULNERABILITY_DB['SWC-107']['description'],
                     'remediation': VULNERABILITY_DB['SWC-107']['remediation'],
                     'cross_function': True,
                     'line_hint': func['line'],
+                    'detection_source': 'GNN' if gnn_reentrancy > 0.3 else 'rule-based',
                 })
 
     # --- SWC-115: Access Control ---
@@ -592,12 +567,13 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
                 'swc_id': 'SWC-115',
                 'vulnerability_type': 'Access Control',
                 'severity': 'critical',
-                'confidence': round(max(0.94, gnn_access), 2),
+                'confidence': round(gnn_access if gnn_access > 0.3 else 0.75, 2),
                 'function_affected': func['name'],
                 'description': VULNERABILITY_DB['SWC-115']['description'],
                 'remediation': VULNERABILITY_DB['SWC-115']['remediation'],
                 'cross_function': False,
                 'line_hint': func['line'],
+                'detection_source': 'GNN' if gnn_access > 0.3 else 'rule-based',
             })
             break
 
@@ -609,12 +585,13 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
             'swc_id': 'SWC-114',
             'vulnerability_type': 'Transaction Order Dependency',
             'severity': 'high',
-            'confidence': round(max(0.89, gnn_tod), 2),
+            'confidence': round(gnn_tod if gnn_tod > 0.3 else 0.72, 2),
             'function_affected': bid_func['name'] if bid_func else 'bid()',
             'description': VULNERABILITY_DB['SWC-114']['description'],
             'remediation': VULNERABILITY_DB['SWC-114']['remediation'],
             'cross_function': True,
             'line_hint': bid_func['line'] if bid_func else None,
+            'detection_source': 'GNN' if gnn_tod > 0.3 else 'rule-based',
         })
 
     # --- SWC-104: Unchecked Send ---
@@ -628,12 +605,13 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
                     'swc_id': 'SWC-104',
                     'vulnerability_type': 'Unchecked Call Return Value',
                     'severity': 'medium',
-                    'confidence': round(max(0.85, gnn_unchecked), 2),
+                    'confidence': round(gnn_unchecked if gnn_unchecked > 0.3 else 0.70, 2),
                     'function_affected': func['name'],
                     'description': VULNERABILITY_DB['SWC-104']['description'],
                     'remediation': VULNERABILITY_DB['SWC-104']['remediation'],
                     'cross_function': False,
                     'line_hint': func['line'],
+                    'detection_source': 'GNN' if gnn_unchecked > 0.3 else 'rule-based',
                 })
                 break
 
@@ -648,12 +626,13 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
                         'swc_id': 'SWC-101',
                         'vulnerability_type': 'Integer Overflow/Underflow',
                         'severity': 'high',
-                        'confidence': round(max(0.82, gnn_arith), 2),
+                        'confidence': round(gnn_arith if gnn_arith > 0.3 else 0.68, 2),
                         'function_affected': func['name'],
                         'description': VULNERABILITY_DB['SWC-101']['description'],
                         'remediation': VULNERABILITY_DB['SWC-101']['remediation'],
                         'cross_function': False,
                         'line_hint': func['line'],
+                        'detection_source': 'GNN' if gnn_arith > 0.3 else 'rule-based',
                     })
                     break
 
@@ -676,7 +655,7 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
     if 'tx.origin' in source_code:
         tx_func = next((f for f in functions if 'tx.origin' in f.get('body', '')), None)
         vulnerabilities.append({
-            'swc_id': 'SWC-115',
+            'swc_id': 'SWC-111',   # Fixed: tx.origin is SWC-111, NOT SWC-115 (Access Control)
             'vulnerability_type': 'tx.origin Authentication',
             'severity': 'medium',
             'confidence': 0.97,
@@ -685,6 +664,7 @@ def detect_vulnerabilities(source_code: str, functions: List[Dict]) -> List[Dict
             'remediation': VULNERABILITY_DB['SWC-115b']['remediation'],
             'cross_function': False,
             'line_hint': tx_func['line'] if tx_func else None,
+            'detection_source': 'rule-based',
         })
 
     return vulnerabilities
@@ -735,14 +715,15 @@ def calculate_metrics(vulnerabilities: List[Dict]) -> Dict:
     confidence_penalty = (1.0 - mean(confidence_values)) * 0.02 if confidence_values else 0.0
     dynamic_acc = max(0.0, TRAINED_METRICS["accuracy"] - confidence_penalty)
     return {
-        'accuracy': round(dynamic_acc, 4),
-        'f1_score': TRAINED_METRICS["f1_score"],
+        'accuracy':  TRAINED_METRICS["accuracy"],   # real value from model_metrics.json
+        'f1_score':  TRAINED_METRICS["f1_score"],
         'precision': TRAINED_METRICS["precision"],
-        'recall': TRAINED_METRICS["recall"],
-        'auc_roc': TRAINED_METRICS["auc_roc"],
+        'recall':    TRAINED_METRICS["recall"],
+        'auc_roc':   TRAINED_METRICS["auc_roc"],
         'risk_score': round(risk_score, 3),
-        'model_name': 'HGT-v4 (Heterogeneous Graph Transformer)',
+        'model_name': 'HGT-v4 (TypedHGT + JK + VirtualNode)',
         'inference_time_ms': 0.0,
+        'metrics_available': all(v is not None for v in TRAINED_METRICS.values()),
     }
 
 
